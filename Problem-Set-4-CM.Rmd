@@ -116,46 +116,40 @@ gss_cv10_step <- vfold_cv(data = gss_train,
                       v = 10)
 
 cv_mse <- tibble(terms = seq(from = 2, 
-                             to = 50),
-                 mse_vfold = ?map_dbl(terms, step_mse, gss_cv10_step))
-cv_mse
-
-holdout_results_step(gss_cv10_step, 2)
-
-
-  mod <- glm(egalit_scale ~ cut(income06, 2), data = analysis(gss_cv10_step))
-  
-  # Save the heldout observations
-  holdout <- assessment(splits)
-  
-  # `augment` will save the predictions with the holdout data set
-  res <- augment(mod, newdata = holdout) %>%
-    # calculate the metric
-    mse(truth = egalit_scale, estimate = .fitted)
-  
-  # Return the assessment data set with the additional columns
-  res
-
-
-
-
+                             to = 15),
+                 mse_vfold = map_dbl(terms, step_mse, gss_cv10_step))
+cv_mse %>%
+  ggplot(aes(terms, mse_vfold)) +
+  geom_line()
 
 ```
-need to fix this somehow
+4 is the optimum number of splits
 
 
 ###3. Natural Regression Spline
 ```{r}
+
+test <- glm(egalit_scale ~ ns(as.factor(income06), df = 5),
+               data = gss_train)
+
+test$fitted
+levels(test$fitted) <- factor(round(test$fitted))
+
+test$fitted <- factor(test$fitted, levels = c(1:14, levels(test$fitted), 24:35))
+
 gss_spline <- function(splits, df = NULL){
   # estimate the model on each fold
   model <- glm(egalit_scale ~ ns(income06, df = df),
                data = analysis(splits))
+
   
   model_acc <- augment(model, newdata = assessment(splits)) %>%
     accuracy(truth = factor(egalit_scale), estimate = factor(round(.fitted)))
   
   mean(model_acc$.estimate)
 }
+
+
 
 tune_over_knots <- function(splits, knots){
   gss_spline(splits, df = knots + 3)
@@ -165,7 +159,7 @@ tune_over_knots <- function(splits, knots){
 results <- vfold_cv(gss_train, v = 10)
 
 
-expand(results, id, knots = 1:25) %>%
+expand(results, id, knots = 1:15) %>%
   left_join(results) %>%
   mutate(acc = map2_dbl(splits, knots, tune_over_knots)) %>%
   group_by(knots) %>%
@@ -178,8 +172,10 @@ expand(results, id, knots = 1:25) %>%
   labs(title = "Optimal number of knots for natural cubic spline regression",
        x = "Knots",
        y = "10-fold CV error")
+
+
 ```
-the truth and estimate factor levels are different -- need to make them the same
+Optimum is 5
 
 ###4. Estimate variety of models
 
@@ -267,4 +263,4 @@ gss_pls_stats <- tibble(
   mutate(pc = row_number(),
          cum_exp = cumsum(pct_exp) / 100)
 ```
-
+DO DISCUSSION
