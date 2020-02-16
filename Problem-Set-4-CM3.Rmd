@@ -1,0 +1,142 @@
+---
+title: "Problem Set 4 - Part 2"
+author: "Pete Cuppernull"
+date: "2/16/2020"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(rcfss)
+library(knitr)
+library(splines)
+library(lattice)
+library(here)
+library(patchwork)
+library(margins)
+#library(ggeffects)
+#library(caret)
+#library(glmnet)
+#library(leaps)
+#library(pls)
+```
+
+
+```{r, include=FALSE}
+gss_test <- read_csv(here("data/gss_test.csv"))
+gss_train <- read_csv(here("data/gss_train.csv"))
+```
+
+
+###4. Estimate variety of models
+
+a. Linear Regression
+```{r, message=FALSE, warning=FALSE}
+#Set Train Control
+library(glmnet)
+library(caret)
+
+train.control <- trainControl(method = "cv", number = 10)
+# Train the model
+model <- train(egalit_scale ~., data = gss_train, method = "lm",
+               trControl = train.control)
+# Summarize the results
+print(model)
+```
+
+b. Elastic net regression
+```{r, message=FALSE}
+library(glmnet)
+gss_train_x <- model.matrix(egalit_scale ~ ., gss_train)[, -1]
+gss_train_y <- log(gss_train$egalit_scale)
+
+gss_test_x <- model.matrix(egalit_scale ~ ., gss_test)[, -1]
+gss_test_y <- log(gss_test$egalit_scale)
+
+fold_id <- sample(1:10, size = length(gss_train_y), replace = TRUE) 
+
+tuning_grid <- tibble::tibble(
+  alpha      = seq(0, 1, by = .1),
+  mse_min    = NA,
+  mse_1se    = NA,
+  lambda_min = NA,
+  lambda_1se = NA
+)
+
+for(i in seq_along(tuning_grid$alpha)) {
+  # fit CV model for each alpha value
+  fit <- cv.glmnet(gss_train_x, 
+                   gss_train_y, 
+                   alpha = tuning_grid$alpha[i], 
+                   foldid = fold_id)
+    # extract MSE and lambda values
+  tuning_grid$mse_min[i]    <- fit$cvm[fit$lambda == fit$lambda.min]
+  tuning_grid$mse_1se[i]    <- fit$cvm[fit$lambda == fit$lambda.1se]
+  tuning_grid$lambda_min[i] <- fit$lambda.min
+  tuning_grid$lambda_1se[i] <- fit$lambda.1se
+}
+
+en_mse <- min(tuning_grid$mse_min)
+
+```
+The MSE of the Elastic Net approach is `r en_mse`.
+
+c. Principal component regression 
+
+```{r, message=FALSE}
+library(pls)
+# PCR first
+gss_pcr <- pcr(egalit_scale ~ .,
+                data = select_if(gss_train, is.numeric),
+                center = TRUE,
+                scale = TRUE,
+                validation = "CV")
+
+# extract needed stats
+gss_pcr_stats <- tibble(
+  pct_exp = loadings(gss_pcr) %>% 
+    attr("explvar"),
+  mse = as.vector(MSEP(gss_pcr, estimate = "CV", intercept = FALSE)$val)
+) %>%
+  mutate(pc = row_number(),
+         cum_exp = cumsum(pct_exp) / 100)
+
+pcr_mse <- min(gss_pcr_stats$mse)
+```
+
+The MSE of the PCR approach is `r pcr_mse`.
+
+d. Partial least squares regression
+```{r, message=FALSE}
+gss_pls <- plsr(egalit_scale ~ .,
+                 data = select_if(gss_train, is.numeric),
+                 center = TRUE,
+                 scale = TRUE,
+                 validation = "CV")
+# extract needed stats
+gss_pls_stats <- tibble(
+  pct_exp = loadings(gss_pls) %>% attr("explvar"),
+  mse = as.vector(MSEP(gss_pls, estimate = "CV", intercept = FALSE)$val)
+) %>%
+  mutate(pc = row_number(),
+         cum_exp = cumsum(pct_exp) / 100)
+pls_mse <- min(gss_pls_stats$mse)
+```
+The MSE of the Elastic Net approach is `r pls_mse`.
+
+##Question 5 - Discussion
+
+```{r}
+##Interaction Plot for LM
+ggplot(gss_train, aes(income06, egalit_scale)) +
+  geom_jitter(color = "gray") +
+  stat_smooth(method='lm', formula = y ~ poly(x, degree = 5), mapping = aes(color = as.factor(sex))) +
+  labs(color = "Sex",
+       title = "Interaction Plot of Sex for Linear Model",
+       x = "Income Level",
+       y = "Egalitarianism")
+
+```
+
+As an example, we can considering the interaction plot above to see that there is a disparate effect of income on egalitarianism between males and females. Considering all of our modeling approaches though, the elastic net appproach appears to be the best given its low MSE of `r en_mse`.
