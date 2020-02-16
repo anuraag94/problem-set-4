@@ -1,0 +1,319 @@
+---
+title: "Problem Set 4"
+author: "Pete Cuppernull"
+date: "2/11/2020"
+output: pdf_document
+---
+Load packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(rcfss)
+library(knitr)
+library(splines)
+library(lattice)
+library(here)
+library(patchwork)
+library(margins)
+#library(ggeffects)
+#library(caret)
+#library(glmnet)
+#library(leaps)
+#library(pls)
+```
+
+Load Data
+```{r}
+gss_test <- read_csv(here("data/gss_test.csv"))
+gss_train <- read_csv(here("data/gss_train.csv"))
+```
+
+###1. Polynomial Regression
+```{r}
+egalit_poly <- glm(egalit_scale ~ poly(income06, degree = 2), data = gss_train, family = gaussian) 
+
+holdout_results <- function(splits, i) {
+  # Fit the model to the training set
+  mod <- glm(egalit_scale ~ poly(income06, i, raw = TRUE), data = analysis(splits))
+  
+  # Save the heldout observations
+  holdout <- assessment(splits)
+  
+  # `augment` will save the predictions with the holdout data set
+  res <- augment(mod, newdata = holdout) %>%
+    # calculate the metric
+    mse(truth = egalit_scale, estimate = .fitted)
+  
+  # Return the assessment data set with the additional columns
+  res
+}
+
+# function to return MSE for a specific fit
+poly_mse <- function(i, vfold_data){
+  vfold_mod <- vfold_data %>%
+    mutate(results = map(splits, holdout_results, i)) %>%
+    unnest(results) %>%
+    spread(.metric, .estimate)
+  
+  mean(vfold_mod$mse)
+}
+
+# split Auto into 10 folds
+gss_cv10 <- vfold_cv(data = gss_train, 
+                      v = 10)
+
+cv_mse <- tibble(terms = seq(from = 1, 
+                             to = 5),
+                 mse_vfold = map_dbl(terms, poly_mse, gss_cv10))
+cv_mse
+which.min(cv_mse$mse_vfold)
+
+ggplot(cv_mse, aes(terms, mse_vfold)) +
+  geom_line() +
+  scale_color_brewer(type = "qual") +
+  labs(title = "MSE estimates",
+       x = "Degree of Polynomial",
+       y = "Mean Squared Error",
+       color = "CV Method")
+
+##plot the fit to the data
+
+ggplot(gss_train, aes(income06, egalit_scale)) +
+  geom_jitter(alpha = .3) +
+  stat_smooth(method='lm', formula = y ~ poly(x, degree = 2))
+```
+
+
+Average Marginal Effects
+```{r}
+
+dY <- diff(gss_train$egalit_scale)/diff(gss_train$income06)
+dX <- rowMeans(embed(gss_train$income06,2))
+originalData <- data.frame(X = gss_train$income06, Y = gss_train$egalit_scale, type = "Original")
+derivativeData <- data.frame(X = dX, Y = dY, type = "Derivative")
+
+
+derivate_averages <- derivativeData %>%
+  group_by(X) %>%
+  filter(Y != -Inf) %>%
+  filter(Y != Inf) %>%
+  summarize(marginal_effect = mean(Y))
+  #mutate(x2 = (X*2),
+       #  is.whole = if_else(x2 %% 2 == 0, TRUE, FALSE)) %>%
+  #filter(is.whole == TRUE)
+
+ggplot() +
+  geom_jitter(data = gss_train, mapping = aes(income06, egalit_scale), alpha = .3) +
+  stat_smooth(data = gss_train, mapping = aes(income06, egalit_scale), method='lm', formula = y ~ poly(x, degree = 2)) +
+  geom_line(data = derivate_averages, mapping = aes(X, marginal_effect), color = "red") +
+  labs(title = "Average Marginal Effect of Income on Egalitarianism",
+       subtitle = "Marginal Effect indicated by red line",
+       x = "Income Level",
+       y = "Egalitarian Scale")
+  
+```
+The average marginal effect of income level on egalitarianism remains largely negative throughout the range of income levels. This indicates that as individuals make more money, thhey are less likely to ascribe to egalitarian preferences. We can observe, however, that from income levels 6-8, egalitarianism increases as income increases -- this would suggest a possible anomaly for this income range where individuals become more egalitarian as their income increases.
+
+
+
+
+
+###2. Step Function
+```{r}
+egalit_step <- glm(egalit_scale ~ cut(income06, 5), data = gss_train) 
+
+
+holdout_results_step <- function(splits, i) {
+  # Fit the model to the training set
+  mod <- glm(egalit_scale ~ cut(income06, i), 
+             data = analysis(splits))
+  
+  # Save the heldout observations
+  holdout <- assessment(splits)
+  
+  # `augment` will save the predictions with the holdout data set
+  res <- augment(mod, newdata = holdout) %>%
+    # calculate the metric
+    mse(truth = egalit_scale, estimate = .fitted)
+  
+  # Return the assessment data set with the additional columns
+  res
+}
+
+# function to return MSE for a specific fit
+step_mse <- function(i, vfold_data){
+  vfold_mod <- vfold_data %>%
+    mutate(results = map(splits, holdout_results_step, i)) %>%
+    unnest(results) %>%
+    spread(.metric, .estimate)
+  
+  mean(vfold_mod$mse)
+}
+
+# split Auto into 10 folds
+gss_cv10_step <- vfold_cv(data = gss_train, 
+                      v = 10)
+
+cv_mse <- tibble(terms = seq(from = 2, 
+                             to = 15),
+                 mse_vfold = map_dbl(terms, step_mse, gss_cv10_step))
+cv_mse %>%
+  ggplot(aes(terms, mse_vfold)) +
+  geom_line() +
+  labs(Title = "MSEs of Step Functions with Varying Cuts",
+       y = "MSE",
+       x = "Number of Cuts")
+
+
+```
+The optimum number of cuts basic on the cross-validation MSEs is 4.
+
+
+###3. Natural Regression Spline
+```{r}
+
+gss_spline <- function(splits, df = NULL){
+  # estimate the model on each fold
+  model <- glm(egalit_scale ~ ns(income06, df = df),
+               data = analysis(splits))
+
+  
+  model_acc <- augment(model, newdata = assessment(splits)) %>%
+    accuracy(truth = factor(egalit_scale, levels = 1:35), estimate = factor(round(.fitted), levels = 1:35))
+  
+  mean(model_acc$.estimate)
+}
+
+
+
+tune_over_knots <- function(splits, knots){
+  gss_spline(splits, df = knots + 3)
+}
+
+# estimate CV error for knots in 0:25
+results <- vfold_cv(gss_train, v = 10)
+
+
+expand(results, id, knots = 1:8) %>%
+  left_join(results) %>%
+  mutate(acc = map2_dbl(splits, knots, tune_over_knots)) %>%
+  group_by(knots) %>%
+  summarize(acc = mean(acc)) %>%
+  mutate(err = 1 - acc) %>%
+  ggplot(aes(knots, err)) +
+  geom_point() +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Optimal number of knots for natural cubic spline regression",
+       x = "Knots",
+       y = "10-fold CV error")
+
+```
+Optimum is 5
+
+###4. Estimate variety of models
+
+a. Linear Regression
+```{r}
+#Set Train Control
+head(gss_train)
+gss_train
+train.control <- trainControl(method = "cv", number = 10)
+# Train the model
+model <- train(egalit_scale ~., data = gss_train, method = "lm",
+               trControl = train.control)
+# Summarize the results
+print(model)
+```
+
+b. Elastic net regression
+```{r}
+gss_train_x <- model.matrix(egalit_scale ~ ., gss_train)[, -1]
+gss_train_y <- log(gss_train$egalit_scale)
+
+gss_test_x <- model.matrix(egalit_scale ~ ., gss_test)[, -1]
+gss_test_y <- log(gss_test$egalit_scale)
+
+fold_id <- sample(1:10, size = length(gss_train_y), replace = TRUE) 
+
+tuning_grid <- tibble::tibble(
+  alpha      = seq(0, 1, by = .1),
+  mse_min    = NA,
+  mse_1se    = NA,
+  lambda_min = NA,
+  lambda_1se = NA
+)
+
+for(i in seq_along(tuning_grid$alpha)) {
+  # fit CV model for each alpha value
+  fit <- cv.glmnet(gss_train_x, 
+                   gss_train_y, 
+                   alpha = tuning_grid$alpha[i], 
+                   foldid = fold_id)
+    # extract MSE and lambda values
+  tuning_grid$mse_min[i]    <- fit$cvm[fit$lambda == fit$lambda.min]
+  tuning_grid$mse_1se[i]    <- fit$cvm[fit$lambda == fit$lambda.1se]
+  tuning_grid$lambda_min[i] <- fit$lambda.min
+  tuning_grid$lambda_1se[i] <- fit$lambda.1se
+}
+
+min(tuning_grid$mse_min)
+
+```
+
+c. Principal component regression 
+
+```{r}
+# PCR first
+gss_pcr <- pcr(egalit_scale ~ .,
+                data = select_if(gss_train, is.numeric),
+                center = TRUE,
+                scale = TRUE,
+                validation = "CV")
+
+# extract needed stats
+gss_pcr_stats <- tibble(
+  pct_exp = loadings(gss_pcr) %>% 
+    attr("explvar"),
+  mse = as.vector(MSEP(gss_pcr, estimate = "CV", intercept = FALSE)$val)
+) %>%
+  mutate(pc = row_number(),
+         cum_exp = cumsum(pct_exp) / 100)
+
+min(gss_pcr_stats$mse)
+```
+
+d. Partial least squares regression
+```{r}
+gss_pls <- plsr(egalit_scale ~ .,
+                 data = select_if(gss_train, is.numeric),
+                 center = TRUE,
+                 scale = TRUE,
+                 validation = "CV")
+# extract needed stats
+gss_pls_stats <- tibble(
+  pct_exp = loadings(gss_pls) %>% attr("explvar"),
+  mse = as.vector(MSEP(gss_pls, estimate = "CV", intercept = FALSE)$val)
+) %>%
+  mutate(pc = row_number(),
+         cum_exp = cumsum(pct_exp) / 100)
+min(gss_pls_stats$mse)
+```
+
+
+##Question 5 - Discussion
+
+Feature interaction plots
+```{r}
+##Interaction Plot for LM
+ggplot(gss_train, aes(income06, egalit_scale)) +
+  geom_jitter(color = "gray") +
+  stat_smooth(method='lm', formula = y ~ poly(x, degree = 5), mapping = aes(color = as.factor(sex))) +
+  labs(color = "Sex",
+       title = "Interaction Plot of Sex for Linear Model",
+       x = "Income Level",
+       y = "Egalitarianism")
+
+```
+
